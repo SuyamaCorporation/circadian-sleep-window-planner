@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>概日リズム睡眠ウィンドウ最適化</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  *:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+  .timeline-wrap { overflow-x: auto; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+<div class="max-w-2xl mx-auto px-4 py-8">
+  <h1 class="text-2xl font-bold text-indigo-400 mb-1">概日リズム睡眠ウィンドウ最適化</h1>
+  <p class="text-gray-400 text-sm mb-6">90分サイクルに基づく最適就寝時刻を計算します</p>
+
+  <div class="bg-gray-900 rounded-xl p-5 mb-5 space-y-4">
+    <div>
+      <label class="block text-sm font-medium text-gray-300 mb-1" for="wakeTime">起床希望時刻</label>
+      <input id="wakeTime" type="time" value="07:00"
+        class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white w-40 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-300 mb-1" for="cycleSlider">
+        睡眠サイクル数: <span id="cycleVal" class="text-indigo-400 font-bold">5</span> サイクル
+      </label>
+      <input id="cycleSlider" type="range" min="4" max="6" value="5"
+        class="w-full accent-indigo-500" aria-label="睡眠サイクル数">
+      <div class="flex justify-between text-xs text-gray-500 mt-1">
+        <span>4サイクル（6h）</span><span>5サイクル（7.5h）</span><span>6サイクル（9h）</span>
+      </div>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-300 mb-1" for="nowTime">現在時刻（任意）</label>
+      <input id="nowTime" type="time"
+        class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white w-40 focus:border-indigo-500">
+      <p class="text-xs text-gray-500 mt-1">入力すると「今から寝ると何サイクル？」を計算</p>
+    </div>
+  </div>
+
+  <div id="results" class="space-y-3 mb-6"></div>
+  <div id="nowResult" class="mb-6"></div>
+
+  <div class="bg-gray-900 rounded-xl p-5">
+    <h2 class="text-sm font-semibold text-gray-300 mb-3">睡眠段階タイムライン（選択サイクル）</h2>
+    <div class="timeline-wrap">
+      <canvas id="timeline" width="600" height="120" role="img" aria-label="睡眠段階タイムライン"></canvas>
+    </div>
+    <div class="flex gap-4 mt-3 text-xs text-gray-400">
+      <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-indigo-700"></span>深睡眠</span>
+      <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-blue-500"></span>浅睡眠</span>
+      <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm bg-purple-400"></span>REM</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const CYCLE_MIN = 90;
+  const FALL_ASLEEP_MIN = 15;
+
+  function htmlEscape(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
+  function timeToMin(str) {
+    const [h, m] = str.split(':').map(Number);
+    return h * 60 + m;
+  }
+  function minToTime(min) {
+    const total = ((min % 1440) + 1440) % 1440;
+    const h = Math.floor(total / 60).toString().padStart(2, '0');
+    const m = (total % 60).toString().padStart(2, '0');
+    return `${h}:${m}`;
+  }
+
+  function load() {
+    const saved = localStorage.getItem('circadian_v1');
+    if (!saved) return;
+    try {
+      const d = JSON.parse(saved);
+      if (d.wake) document.getElementById('wakeTime').value = d.wake;
+      if (d.cycle) document.getElementById('cycleSlider').value = d.cycle;
+      if (d.now) document.getElementById('nowTime').value = d.now;
+    } catch(e) {}
+  }
+  function save() {
+    localStorage.setItem('circadian_v1', JSON.stringify({
+      wake: document.getElementById('wakeTime').value,
+      cycle: document.getElementById('cycleSlider').value,
+      now: document.getElementById('nowTime').value,
+    }));
+  }
+
+  function render() {
+    const wake = document.getElementById('wakeTime').value;
+    const cycles = parseInt(document.getElementById('cycleSlider').value);
+    const nowVal = document.getElementById('nowTime').value;
+    document.getElementById('cycleVal').textContent = cycles;
+
+    const wakeMin = timeToMin(wake);
+    const resultsEl = document.getElementById('results');
+    resultsEl.innerHTML = '';
+
+    const descriptions = {4:'6時間 — 短めだが十分な回復',5:'7.5時間 — 多くの人に最適',6:'9時間 — たっぷり回復'};
+    const colors = {4:'border-yellow-500 bg-yellow-900/30',5:'border-indigo-500 bg-indigo-900/40',6:'border-green-500 bg-green-900/30'};
+
+    [4,5,6].forEach(n => {
+      const sleepMin = wakeMin - FALL_ASLEEP_MIN - (n * CYCLE_MIN);
+      const bedTime = minToTime(sleepMin);
+      const isSelected = n === cycles;
+      const card = document.createElement('div');
+      card.className = `border-2 rounded-xl p-4 flex items-center justify-between ${colors[n]} ${isSelected ? 'ring-2 ring-offset-2 ring-offset-gray-950 ring-indigo-400' : 'opacity-80'}`;
+      card.innerHTML = `
+        <div>
+          <div class="text-xs text-gray-400 mb-0.5">${n}サイクル ― ${descriptions[n]}</div>
+          <div class="text-2xl font-bold text-white">${bedTime}</div>
+          <div class="text-xs text-gray-400 mt-0.5">就寝 → ${FALL_ASLEEP_MIN}分で入眠 → ${htmlEscape(wake)}起床</div>
+        </div>
+        <div class="text-right">
+          <div class="text-sm font-medium text-gray-300">${n * CYCLE_MIN / 60}時間</div>
+          <div class="text-xs text-gray-500">睡眠時間</div>
+        </div>`;
+      resultsEl.appendChild(card);
+    });
+
+    if (nowVal) {
+      const nowMin = timeToMin(nowVal);
+      let sleepDur = wakeMin - nowMin - FALL_ASLEEP_MIN;
+      if (sleepDur < 0) sleepDur += 1440;
+      const cyc = Math.floor(sleepDur / CYCLE_MIN);
+      const rem = sleepDur % CYCLE_MIN;
+      const el = document.getElementById('nowResult');
+      el.innerHTML = `
+        <div class="bg-gray-900 rounded-xl p-4 border border-gray-700">
+          <p class="text-sm text-gray-400 mb-1">今 <span class="font-semibold text-white">${htmlEscape(nowVal)}</span> から寝ると…</p>
+          <p class="text-lg font-bold text-indigo-300">約 <span class="text-2xl">${cyc}</span> サイクル（${Math.floor(sleepDur/60)}時間${sleepDur%60}分）</p>
+          <p class="text-xs text-gray-500 mt-1">次のサイクル完了まで ${CYCLE_MIN - rem} 分の余裕があります</p>
+        </div>`;
+    } else {
+      document.getElementById('nowResult').innerHTML = '';
+    }
+
+    drawTimeline(cycles, wakeMin);
+    save();
+  }
+
+  function drawTimeline(cycles, wakeMin) {
+    const canvas = document.getElementById('timeline');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const startMin = wakeMin - FALL_ASLEEP_MIN - cycles * CYCLE_MIN;
+    const totalMin = FALL_ASLEEP_MIN + cycles * CYCLE_MIN;
+    const scale = (W - 60) / totalMin;
+    const offsetX = 50;
+    const barH = 36;
+    const barY = (H - barH) / 2;
+
+    // Sleep stage pattern per 90min cycle
+    // [type, duration_min]: type 0=deep, 1=light, 2=REM
+    function getCycleStages(cycleIdx) {
+      if (cycleIdx === 0) return [[0,20],[1,20],[0,20],[1,15],[2,15]];
+      if (cycleIdx === 1) return [[0,15],[1,25],[0,10],[2,20],[1,20]];
+      return [[0,10],[1,25],[2,30],[1,25]];
+    }
+    const stageColors = ['#4338ca','#3b82f6','#a78bfa'];
+
+    // fall asleep block
+    ctx.fillStyle = '#374151';
+    ctx.beginPath();
+    ctx.roundRect(offsetX, barY, FALL_ASLEEP_MIN * scale, barH, 4);
+    ctx.fill();
+
+    let xPos = offsetX + FALL_ASLEEP_MIN * scale;
+    for (let c = 0; c < cycles; c++) {
+      const stages = getCycleStages(Math.min(c, 2));
+      stages.forEach(([type, dur]) => {
+        ctx.fillStyle = stageColors[type];
+        const w = dur * scale;
+        ctx.beginPath();
+        ctx.roundRect(xPos, barY + (type === 0 ? 6 : type === 2 ? 2 : 0), w, barH - (type === 0 ? 12 : type === 2 ? 4 : 0), 2);
+        ctx.fill();
+        xPos += w;
+      });
+      // cycle separator
+      ctx.strokeStyle = '#1f2937';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(xPos, barY);
+      ctx.lineTo(xPos, barY + barH);
+      ctx.stroke();
+    }
+
+    // Time labels
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    const startT = minToTime(((startMin % 1440) + 1440) % 1440);
+    const endT = minToTime(((wakeMin % 1440) + 1440) % 1440);
+    ctx.fillText(startT, offsetX, barY + barH + 15);
+    ctx.fillText(endT, W - 10, barY + barH + 15);
+    ctx.fillStyle = '#6366f1';
+    ctx.textAlign = 'left';
+    ctx.fillText('就寝', offsetX, barY - 6);
+    ctx.textAlign = 'right';
+    ctx.fillText('起床', W - 2, barY - 6);
+  }
+
+  load();
+  render();
+
+  document.getElementById('wakeTime').addEventListener('input', render);
+  document.getElementById('cycleSlider').addEventListener('input', render);
+  document.getElementById('nowTime').addEventListener('input', render);
+})();
+</script>
+</body>
+</html>
